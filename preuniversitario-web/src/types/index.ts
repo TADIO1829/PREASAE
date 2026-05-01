@@ -54,6 +54,7 @@ export interface EntregaActividad {
   id: number
   contenido_id: number
   estudiante_id: string
+  simulador_intento_id?: number | null
   archivo_url?: string | null
   comentario?: string | null
   nota?: number | null
@@ -71,6 +72,7 @@ export interface Simulador {
   titulo?: string | null
   instrucciones?: string | null
   duracion_minutos: number
+  max_intentos?: number | null
   mostrar_resultado_inmediato: boolean
   mezclar_preguntas: boolean
   created_at?: string
@@ -80,7 +82,11 @@ export interface Simulador {
 export interface SimuladorPregunta {
   id: number
   simulador_id: number
+  tema?: string | null
+  dificultad?: 'basico' | 'intermedio' | 'avanzado' | null
   enunciado: string
+  recurso_visual_url?: string | null
+  recurso_visual_alt?: string | null
   opcion_a: string
   opcion_b: string
   opcion_c?: string | null
@@ -96,11 +102,30 @@ export interface SimuladorIntento {
   id: number
   simulador_id: number
   estudiante_id: string
+  numero_intento?: number | null
   puntaje: number
   total_preguntas: number
   tiempo_segundos?: number | null
   completado_en?: string | null
   respuestas?: Record<string, string> | null
+  created_at?: string
+  updated_at?: string
+}
+
+export interface PreguntaBanco {
+  id: number
+  tema?: string | null
+  dificultad?: 'basico' | 'intermedio' | 'avanzado' | null
+  enunciado: string
+  recurso_visual_url?: string | null
+  recurso_visual_alt?: string | null
+  opcion_a: string
+  opcion_b: string
+  opcion_c?: string | null
+  opcion_d?: string | null
+  respuesta_correcta: 'A' | 'B' | 'C' | 'D'
+  explicacion?: string | null
+  created_by?: string | null
   created_at?: string
   updated_at?: string
 }

@@ -1,8 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import MathContent from '../components/MathContent'
+import ResourceImage from '../components/ResourceImage'
 import { supabase } from '../services/supabaseClient'
+import { getEntregaStatus } from '../utils/activityStatus'
 import type {
   ContenidoLeccion,
+  EntregaActividad,
+  Leccion,
   Simulador,
   SimuladorIntento,
   SimuladorPregunta,
@@ -13,18 +18,24 @@ type AnswerMap = Record<number, 'A' | 'B' | 'C' | 'D'>
 export default function SimuladorPlayer() {
   const { contenidoId } = useParams()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const contenidoNumericId = Number(contenidoId)
+  const courseId = searchParams.get('curso')
 
   const [contenido, setContenido] = useState<ContenidoLeccion | null>(null)
+  const [leccion, setLeccion] = useState<Leccion | null>(null)
   const [simulador, setSimulador] = useState<Simulador | null>(null)
   const [preguntas, setPreguntas] = useState<SimuladorPregunta[]>([])
   const [answers, setAnswers] = useState<AnswerMap>({})
+  const [attempts, setAttempts] = useState<SimuladorIntento[]>([])
   const [currentIndex, setCurrentIndex] = useState(0)
   const [started, setStarted] = useState(false)
   const [finished, setFinished] = useState(false)
   const [secondsLeft, setSecondsLeft] = useState(0)
+  const [finalTimeUsed, setFinalTimeUsed] = useState<number | null>(null)
   const [mensaje, setMensaje] = useState('')
   const [lastIntento, setLastIntento] = useState<SimuladorIntento | null>(null)
+  const [isFinishing, setIsFinishing] = useState(false)
 
   useEffect(() => {
     void loadSimulator()
@@ -94,7 +105,7 @@ export default function SimuladorPlayer() {
           .select('*')
           .eq('estudiante_id', user.id)
           .order('created_at', { ascending: false })
-          .limit(1),
+          .order('id', { ascending: false }),
       )
     }
 
@@ -106,7 +117,23 @@ export default function SimuladorPlayer() {
       return
     }
 
+    let leccionData: Leccion | null = null
+    if (contenidoRes.data?.leccion_id) {
+      const { data: lessonRow, error: lessonError } = await supabase
+        .from('lecciones')
+        .select('*')
+        .eq('id', contenidoRes.data.leccion_id)
+        .maybeSingle()
+
+      if (lessonError) {
+        console.log(lessonError)
+      } else {
+        leccionData = lessonRow || null
+      }
+    }
+
     setContenido(contenidoRes.data || null)
+    setLeccion(leccionData)
     setSimulador(simuladorRes.data || null)
     const questionRows = (preguntasRes.data || []) as SimuladorPregunta[]
     const list = questionRows.filter(
@@ -116,8 +143,16 @@ export default function SimuladorPlayer() {
       ? [...list].sort(() => Math.random() - 0.5)
       : list
     setPreguntas(ordered)
-    setLastIntento((intentoRes?.data as SimuladorIntento[] | undefined)?.[0] || null)
-    setSecondsLeft((simuladorRes.data?.duracion_minutos || 20) * 60)
+    const allAttempts = ((intentoRes?.data as SimuladorIntento[] | undefined) || []).filter(
+      (intento) => intento.simulador_id === simuladorRes.data?.id,
+    )
+    const latestAttempt = allAttempts[0] || null
+    setAttempts(allAttempts)
+    setLastIntento(latestAttempt)
+
+    if (!started && !finished) {
+      setSecondsLeft((simuladorRes.data?.duracion_minutos || 20) * 60)
+    }
   }
 
   const formatTime = (value: number) => {
@@ -134,8 +169,58 @@ export default function SimuladorPlayer() {
     }))
   }
 
+  const goBackToCourse = () => {
+    if (courseId) {
+      navigate(`/curso/${courseId}`)
+      return
+    }
+
+    navigate(-1)
+  }
+
+  const registrarEntregaSimulador = async (
+    userId: string,
+    score: number,
+    usedSeconds: number,
+    intentoId: number,
+  ) => {
+    if (!contenido?.acepta_entrega || !leccion) return
+
+    const { data: entregaActual, error: entregaActualError } = await supabase
+      .from('entregas_actividades')
+      .select('*')
+      .eq('contenido_id', contenido.id)
+      .eq('estudiante_id', userId)
+      .maybeSingle()
+
+    if (entregaActualError) {
+      throw entregaActualError
+    }
+
+    const status = getEntregaStatus(leccion, contenido, entregaActual as EntregaActividad | null)
+    const payload = {
+      contenido_id: contenido.id,
+      estudiante_id: userId,
+      archivo_url: entregaActual?.archivo_url || null,
+      simulador_intento_id: intentoId,
+      comentario: `Simulador completado: ${score}/${preguntas.length} en ${formatTime(usedSeconds)}.`,
+      estado: status === 'vencido' ? 'vencido' : 'entregado',
+      entregado_en: new Date().toISOString(),
+      nota: null,
+      retroalimentacion: null,
+    }
+
+    const { error } = await supabase
+      .from('entregas_actividades')
+      .upsert(payload, { onConflict: 'contenido_id,estudiante_id' })
+
+    if (error) {
+      throw error
+    }
+  }
+
   const finishSimulator = async () => {
-    if (!simulador) return
+    if (!simulador || isFinishing) return
 
     const {
       data: { user },
@@ -146,27 +231,55 @@ export default function SimuladorPlayer() {
       return
     }
 
+    if (simulador.max_intentos && attempts.length >= simulador.max_intentos) {
+      setMensaje('Ya alcanzaste el maximo de intentos permitido para este simulador.')
+      return
+    }
+
+    setIsFinishing(true)
+    const timeUsed = Math.max(0, (simulador.duracion_minutos * 60) - secondsLeft)
     setFinished(true)
+    setFinalTimeUsed(timeUsed)
 
     const payload = {
       simulador_id: simulador.id,
       estudiante_id: user.id,
       puntaje: correctCount,
       total_preguntas: preguntas.length,
-      tiempo_segundos: (simulador.duracion_minutos * 60) - secondsLeft,
+      numero_intento: attempts.length + 1,
+      tiempo_segundos: timeUsed,
       respuestas: answers,
     }
 
-    const { error } = await supabase.from('simulador_intentos').insert([payload])
+    const { data: intentoGuardado, error } = await supabase
+      .from('simulador_intentos')
+      .insert([payload])
+      .select()
+      .single()
 
     if (error) {
       console.log(error)
       setMensaje('No se pudo guardar el intento del simulador.')
+      setIsFinishing(false)
       return
     }
 
+    try {
+      await registrarEntregaSimulador(user.id, correctCount, timeUsed, intentoGuardado.id)
+    } catch (submissionError) {
+      console.log(submissionError)
+      setMensaje(
+        'El simulador se guardo, pero no se pudo registrar la entrega de la actividad.',
+      )
+      setLastIntento((intentoGuardado as SimuladorIntento) || null)
+      setIsFinishing(false)
+      return
+    }
+
+    setLastIntento((intentoGuardado as SimuladorIntento) || null)
+    setAttempts((current) => [(intentoGuardado as SimuladorIntento), ...current])
     setMensaje('Simulador completado con exito.')
-    await loadSimulator()
+    setIsFinishing(false)
   }
 
   const nextQuestion = async () => {
@@ -183,8 +296,8 @@ export default function SimuladorPlayer() {
   return (
     <div className="container simulator-shell">
       <div className="admin-course-header">
-        <button className="resource-button secondary" onClick={() => navigate(-1)}>
-          Volver
+        <button className="resource-button secondary" onClick={goBackToCourse}>
+          {courseId ? 'Volver al curso' : 'Volver'}
         </button>
         <div>
           <p className="dashboard-eyebrow">Simulador interactivo</p>
@@ -209,10 +322,13 @@ export default function SimuladorPlayer() {
         <section className="curso-card simulator-start-card">
           <p className="dashboard-eyebrow">Antes de comenzar</p>
           <h3>{simulador?.titulo || contenido?.titulo}</h3>
-          <p className="module-description">
-            {simulador?.instrucciones ||
-              'Al iniciar, comienza el cronometro. Cada reactivo acepta una sola respuesta.'}
-          </p>
+          <MathContent
+            text={
+              simulador?.instrucciones ||
+              'Al iniciar, comienza el cronometro. Cada reactivo acepta una sola respuesta.'
+            }
+            className="module-description resource-math-content"
+          />
           <div className="admin-class-summary">
             <div className="summary-chip">
               <span>Preguntas</span>
@@ -230,10 +346,40 @@ export default function SimuladorPlayer() {
                   : 'Sin intentos'}
               </strong>
             </div>
+            <div className="summary-chip">
+              <span>Intentos usados</span>
+              <strong>
+                {attempts.length}
+                {simulador?.max_intentos ? `/${simulador.max_intentos}` : ''}
+              </strong>
+            </div>
           </div>
-          <button className="resource-button" onClick={() => setStarted(true)}>
-            Iniciar simulador
+          <button
+            className="resource-button"
+            onClick={() => {
+              if (simulador?.max_intentos && attempts.length >= simulador.max_intentos) {
+                setMensaje('Ya alcanzaste el maximo de intentos permitido para este simulador.')
+                return
+              }
+              setFinalTimeUsed(null)
+              setMensaje('')
+              setAnswers({})
+              setCurrentIndex(0)
+              setFinished(false)
+              setSecondsLeft((simulador?.duracion_minutos || 20) * 60)
+              setStarted(true)
+            }}
+            disabled={Boolean(simulador?.max_intentos && attempts.length >= simulador.max_intentos)}
+          >
+            {simulador?.max_intentos && attempts.length >= simulador.max_intentos
+              ? 'Intentos agotados'
+              : 'Iniciar simulador'}
           </button>
+          {courseId && (
+            <button className="resource-button secondary" onClick={goBackToCourse}>
+              Volver al curso
+            </button>
+          )}
         </section>
       )}
 
@@ -248,7 +394,19 @@ export default function SimuladorPlayer() {
             </span>
           </div>
 
-          <h3>{currentQuestion.enunciado}</h3>
+          <h3>
+            <MathContent text={currentQuestion.enunciado} className="resource-math-content resource-title" />
+          </h3>
+
+          {currentQuestion.recurso_visual_url && (
+            <div className="question-visual-preview student">
+              <ResourceImage
+                resource={currentQuestion.recurso_visual_url}
+                alt={currentQuestion.recurso_visual_alt || 'Recurso visual de la pregunta'}
+                className="uploaded-media-preview"
+              />
+            </div>
+          )}
 
           <div className="simulator-options">
             {(['A', 'B', 'C', 'D'] as const).map((option) => {
@@ -279,7 +437,7 @@ export default function SimuladorPlayer() {
                   disabled={Boolean(answers[currentQuestion.id])}
                 >
                   <strong>{option}</strong>
-                  <span>{content}</span>
+                  <MathContent text={content} className="resource-math-content inline" />
                 </button>
               )
             })}
@@ -297,7 +455,10 @@ export default function SimuladorPlayer() {
                   : `Respuesta incorrecta. La correcta es ${currentQuestion.respuesta_correcta}.`}
               </p>
               {currentQuestion.explicacion && (
-                <p className="module-description">{currentQuestion.explicacion}</p>
+                <MathContent
+                  text={currentQuestion.explicacion}
+                  className="module-description resource-math-content"
+                />
               )}
             </div>
           )}
@@ -306,10 +467,19 @@ export default function SimuladorPlayer() {
             <button
               className="resource-button"
               onClick={() => void nextQuestion()}
-              disabled={!answers[currentQuestion.id]}
+              disabled={!answers[currentQuestion.id] || isFinishing}
             >
-              {currentIndex === preguntas.length - 1 ? 'Finalizar simulador' : 'Siguiente pregunta'}
+              {currentIndex === preguntas.length - 1
+                ? isFinishing
+                  ? 'Guardando resultado...'
+                  : 'Finalizar simulador'
+                : 'Siguiente pregunta'}
             </button>
+            {courseId && (
+              <button className="resource-button secondary" onClick={goBackToCourse}>
+                Salir al curso
+              </button>
+            )}
           </div>
         </section>
       )}
@@ -324,17 +494,28 @@ export default function SimuladorPlayer() {
               <strong>{correctCount}/{preguntas.length}</strong>
             </div>
             <div className="summary-chip">
+              <span>Intento</span>
+              <strong>{lastIntento?.numero_intento || attempts[0]?.numero_intento || attempts.length || 1}</strong>
+            </div>
+            <div className="summary-chip">
               <span>Respuestas</span>
               <strong>{answeredCount}</strong>
             </div>
             <div className="summary-chip">
               <span>Tiempo usado</span>
-              <strong>{formatTime((simulador?.duracion_minutos || 20) * 60 - secondsLeft)}</strong>
+              <strong>{formatTime(finalTimeUsed ?? lastIntento?.tiempo_segundos ?? 0)}</strong>
             </div>
           </div>
-          <button className="resource-button" onClick={() => window.location.reload()}>
-            Intentarlo de nuevo
-          </button>
+          <div className="action-row">
+            <button className="resource-button" onClick={() => window.location.reload()}>
+              Intentarlo de nuevo
+            </button>
+            {courseId && (
+              <button className="resource-button secondary" onClick={goBackToCourse}>
+                Volver al curso
+              </button>
+            )}
+          </div>
         </section>
       )}
     </div>

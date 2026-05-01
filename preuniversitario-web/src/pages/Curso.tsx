@@ -1,10 +1,16 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useParams } from 'react-router-dom'
+import ResourceImage from '../components/ResourceImage'
 import { supabase } from '../services/supabaseClient'
 import { formatDateTime } from '../utils/dates'
 import { getEntregaStatus, getStatusLabel } from '../utils/activityStatus'
-import { isSafeHttpUrl, MAX_PDF_SIZE_BYTES, sanitizeFileName } from '../utils/security'
+import {
+  isImageResource,
+  isSafeHttpUrl,
+  MAX_UPLOAD_SIZE_BYTES,
+  sanitizeFileName,
+} from '../utils/security'
 import type {
   ContenidoLeccion,
   EntregaActividad,
@@ -178,7 +184,7 @@ export default function Curso() {
       return
     }
 
-    if (form.file && form.file.size > MAX_PDF_SIZE_BYTES) {
+    if (form.file && form.file.size > MAX_UPLOAD_SIZE_BYTES) {
       setMensaje('El archivo de entrega no puede superar los 10 MB.')
       return
     }
@@ -254,6 +260,8 @@ export default function Curso() {
     }
   }
 
+  const canPreviewImage = (value?: string | null) => Boolean(value && isImageResource(value))
+
   return (
     <div className="container course-view-shell">
       <section className="course-page-hero">
@@ -304,12 +312,24 @@ export default function Curso() {
               )}
 
               {leccion.pdf_url && (
-                <button
-                  className="resource-button"
-                  onClick={() => void abrirRecurso(leccion.pdf_url, `pdf-${leccion.id}`)}
-                >
-                  {openingKey === `pdf-${leccion.id}` ? 'Abriendo...' : 'Abrir material base'}
-                </button>
+                <>
+                  {canPreviewImage(leccion.pdf_url) && (
+                    <div className="media-preview-card">
+                      <p className="resource-type">Material visual</p>
+                      <ResourceImage
+                        resource={leccion.pdf_url}
+                        alt={`Material visual de ${leccion.titulo}`}
+                        className="uploaded-media-preview"
+                      />
+                    </div>
+                  )}
+                  <button
+                    className="resource-button"
+                    onClick={() => void abrirRecurso(leccion.pdf_url, `pdf-${leccion.id}`)}
+                  >
+                    {openingKey === `pdf-${leccion.id}` ? 'Abriendo...' : 'Abrir material base'}
+                  </button>
+                </>
               )}
 
               {leccion.contenidos.length === 0 && (
@@ -333,6 +353,16 @@ export default function Curso() {
                       </div>
                       <h4>{contenido.orden}. {contenido.titulo}</h4>
                       <p>{contenido.descripcion || 'Sin descripcion.'}</p>
+                      {canPreviewImage(contenido.contenido_url) && (
+                        <div className="media-preview-card">
+                          <p className="resource-type">Vista previa</p>
+                          <ResourceImage
+                            resource={contenido.contenido_url}
+                            alt={`Vista previa de ${contenido.titulo}`}
+                            className="uploaded-media-preview"
+                          />
+                        </div>
+                      )}
                       {entrega?.nota !== null && entrega?.nota !== undefined && (
                         <p><strong>Nota:</strong> {entrega.nota}</p>
                       )}
@@ -346,7 +376,7 @@ export default function Curso() {
                         className="resource-button module-action-button"
                         onClick={() =>
                           contenido.tipo === 'simulador'
-                            ? navigate(`/simulador/${contenido.id}`)
+                            ? navigate(`/simulador/${contenido.id}?curso=${id}`)
                             : void abrirRecurso(contenido.contenido_url, actionKey)
                         }
                       >

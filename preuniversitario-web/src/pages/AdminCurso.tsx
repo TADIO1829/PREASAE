@@ -1,10 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
+import MathContent from '../components/MathContent'
+import ResourceImage from '../components/ResourceImage'
 import { supabase } from '../services/supabaseClient'
 import {
-  isPdfFile,
+  isImageFile,
+  isImageResource,
+  isPdfOrImageFile,
   isSafeHttpUrl,
-  MAX_PDF_SIZE_BYTES,
+  MAX_UPLOAD_SIZE_BYTES,
   normalizeText,
   sanitizeFileName,
 } from '../utils/security'
@@ -16,6 +20,7 @@ import type {
   EntregaActividad,
   Leccion,
   Simulador,
+  SimuladorIntento,
   SimuladorPregunta,
   TipoContenido,
 } from '../types'
@@ -77,6 +82,7 @@ export default function AdminCurso() {
   const [contenidos, setContenidos] = useState<ContenidoLeccion[]>([])
   const [entregas, setEntregas] = useState<EntregaActividad[]>([])
   const [simuladores, setSimuladores] = useState<Simulador[]>([])
+  const [simuladorIntentos, setSimuladorIntentos] = useState<SimuladorIntento[]>([])
   const [simuladorPreguntas, setSimuladorPreguntas] = useState<SimuladorPregunta[]>([])
   const [lessonForm, setLessonForm] = useState<LeccionFormState>(INITIAL_LECCION_FORM)
   const [contentForm, setContentForm] = useState<ContenidoFormState>(INITIAL_CONTENIDO_FORM)
@@ -92,10 +98,36 @@ export default function AdminCurso() {
   const [showLessonForm, setShowLessonForm] = useState(false)
   const [showContentForm, setShowContentForm] = useState(false)
   const [revisionForms, setRevisionForms] = useState<Record<number, RevisionFormState>>({})
+  const [lessonPreviewUrl, setLessonPreviewUrl] = useState<string | null>(null)
+  const [resourcePreviewUrl, setResourcePreviewUrl] = useState<string | null>(null)
 
   useEffect(() => {
     void cargarCurso()
   }, [id])
+
+  useEffect(() => {
+    if (!lessonFile || !isImageFile(lessonFile)) {
+      setLessonPreviewUrl(null)
+      return
+    }
+
+    const objectUrl = URL.createObjectURL(lessonFile)
+    setLessonPreviewUrl(objectUrl)
+
+    return () => URL.revokeObjectURL(objectUrl)
+  }, [lessonFile])
+
+  useEffect(() => {
+    if (!resourceFile || !isImageFile(resourceFile)) {
+      setResourcePreviewUrl(null)
+      return
+    }
+
+    const objectUrl = URL.createObjectURL(resourceFile)
+    setResourcePreviewUrl(objectUrl)
+
+    return () => URL.revokeObjectURL(objectUrl)
+  }, [resourceFile])
 
   const contenidosDeLeccion = useMemo(
     () =>
@@ -129,6 +161,42 @@ export default function AdminCurso() {
     [simuladores, contenidos, editingContenidoId],
   )
 
+  const gradebookRows = useMemo(() => {
+    const evaluables = contenidos.filter((contenido) => contenido.acepta_entrega)
+    const evaluableIds = new Set(evaluables.map((contenido) => contenido.id))
+    const courseEntregas = entregas.filter((entrega) => evaluableIds.has(entrega.contenido_id))
+    const byStudent = new Map<string, EntregaActividad[]>()
+
+    courseEntregas.forEach((entrega) => {
+      const current = byStudent.get(entrega.estudiante_id) || []
+      current.push(entrega)
+      byStudent.set(entrega.estudiante_id, current)
+    })
+
+    return [...byStudent.entries()]
+      .map(([studentId, studentEntregas]) => {
+        const graded = studentEntregas.filter(
+          (entrega) => entrega.nota !== null && entrega.nota !== undefined,
+        )
+        const promedio =
+          graded.length > 0
+            ? graded.reduce((total, entrega) => total + (entrega.nota || 0), 0) / graded.length
+            : null
+
+        return {
+          studentId,
+          totalActividades: evaluables.length,
+          entregadas: studentEntregas.length,
+          calificadas: graded.length,
+          pendientes: Math.max(evaluables.length - studentEntregas.length, 0),
+          promedio,
+        }
+      })
+      .sort((a, b) => (b.promedio ?? -1) - (a.promedio ?? -1) || a.studentId.localeCompare(b.studentId))
+  }, [contenidos, entregas])
+
+  const shortStudentId = (value: string) => `${value.slice(0, 8)}...`
+
   const cargarCurso = async () => {
     if (!Number.isInteger(cursoId) || cursoId <= 0) {
       setMensaje('Curso invalido.')
@@ -141,6 +209,7 @@ export default function AdminCurso() {
       { data: contenidosData, error: contenidosError },
       { data: entregasData, error: entregasError },
       { data: simuladoresData, error: simuladoresError },
+      { data: simuladorIntentosData, error: simuladorIntentosError },
       { data: simuladorPreguntasData, error: simuladorPreguntasError },
     ] = await Promise.all([
       supabase.from('cursos').select('*').eq('id', cursoId).maybeSingle(),
@@ -161,6 +230,10 @@ export default function AdminCurso() {
         .order('created_at', { ascending: false }),
       supabase.from('simuladores').select('*').order('created_at', { ascending: false }),
       supabase
+        .from('simulador_intentos')
+        .select('*')
+        .order('created_at', { ascending: false }),
+      supabase
         .from('simulador_preguntas')
         .select('*')
         .order('orden', { ascending: true })
@@ -173,6 +246,7 @@ export default function AdminCurso() {
       contenidosError ||
       entregasError ||
       simuladoresError ||
+      simuladorIntentosError ||
       simuladorPreguntasError
     ) {
       console.log(
@@ -181,6 +255,7 @@ export default function AdminCurso() {
         contenidosError ||
         entregasError ||
         simuladoresError ||
+        simuladorIntentosError ||
         simuladorPreguntasError,
       )
       setMensaje('No se pudo cargar el panel del curso.')
@@ -192,6 +267,7 @@ export default function AdminCurso() {
     setContenidos(contenidosData || [])
     setEntregas(entregasData || [])
     setSimuladores(simuladoresData || [])
+    setSimuladorIntentos(simuladorIntentosData || [])
     setSimuladorPreguntas(simuladorPreguntasData || [])
     setSelectedLeccionId((current) => current ?? leccionesData?.[0]?.id ?? null)
   }
@@ -309,14 +385,14 @@ export default function AdminCurso() {
     }
 
     if (lessonFile) {
-      if (!isPdfFile(lessonFile)) {
-        setMensaje('El archivo principal debe ser PDF.')
+      if (!isPdfOrImageFile(lessonFile)) {
+        setMensaje('El archivo principal debe ser PDF o imagen.')
         limpiarMensaje()
         return null
       }
 
-      if (lessonFile.size > MAX_PDF_SIZE_BYTES) {
-        setMensaje('El PDF principal no puede superar los 10 MB.')
+      if (lessonFile.size > MAX_UPLOAD_SIZE_BYTES) {
+        setMensaje('El archivo principal no puede superar los 10 MB.')
         limpiarMensaje()
         return null
       }
@@ -355,8 +431,14 @@ export default function AdminCurso() {
       return null
     }
 
-    if (resourceFile && resourceFile.size > MAX_PDF_SIZE_BYTES) {
+    if (resourceFile && resourceFile.size > MAX_UPLOAD_SIZE_BYTES) {
       setMensaje('El archivo del contenido no puede superar los 10 MB.')
+      limpiarMensaje()
+      return null
+    }
+
+    if (resourceFile && !isPdfOrImageFile(resourceFile)) {
+      setMensaje('El archivo del contenido debe ser PDF o imagen.')
       limpiarMensaje()
       return null
     }
@@ -398,6 +480,7 @@ export default function AdminCurso() {
           duracion_minutos: template.duracion_minutos,
           mostrar_resultado_inmediato: template.mostrar_resultado_inmediato,
           mezclar_preguntas: template.mezclar_preguntas,
+          max_intentos: template.max_intentos,
         },
       ])
       .select()
@@ -420,6 +503,8 @@ export default function AdminCurso() {
         preguntasTemplate.map((pregunta) => ({
           simulador_id: newSimulator.id,
           enunciado: pregunta.enunciado,
+          recurso_visual_url: pregunta.recurso_visual_url,
+          recurso_visual_alt: pregunta.recurso_visual_alt,
           opcion_a: pregunta.opcion_a,
           opcion_b: pregunta.opcion_b,
           opcion_c: pregunta.opcion_c,
@@ -442,7 +527,7 @@ export default function AdminCurso() {
     if (!payload) return
 
     if (!editingLeccionId && !lessonFile) {
-      setMensaje('Debes adjuntar un PDF principal para crear una clase nueva.')
+      setMensaje('Debes adjuntar un archivo principal para crear una clase nueva.')
       limpiarMensaje()
       return
     }
@@ -823,6 +908,30 @@ export default function AdminCurso() {
   const getEntregasDeContenido = (contenidoId: number) =>
     entregas.filter((item) => item.contenido_id === contenidoId)
 
+  const getSimuladorDeContenido = (contenidoId: number) =>
+    simuladores.find((item) => item.contenido_id === contenidoId) || null
+
+  const getIntentoDeEntrega = (entrega: EntregaActividad, contenidoId: number) => {
+    if (entrega.simulador_intento_id) {
+      return (
+        simuladorIntentos.find((item) => item.id === entrega.simulador_intento_id) || null
+      )
+    }
+
+    const simulador = getSimuladorDeContenido(contenidoId)
+    if (!simulador) return null
+
+    return (
+      simuladorIntentos.find(
+        (item) =>
+          item.simulador_id === simulador.id && item.estudiante_id === entrega.estudiante_id,
+      ) || null
+    )
+  }
+
+  const getRespuestaLabel = (preguntaId: number, respuestas?: Record<string, string> | null) =>
+    respuestas?.[String(preguntaId)] || 'Sin responder'
+
   return (
     <div className="container admin-course-layout">
       <div className="admin-course-header">
@@ -984,14 +1093,21 @@ export default function AdminCurso() {
                 </label>
 
                 <label>
-                  PDF principal {editingLeccionId ? '(opcional para reemplazar)' : ''}
+                  Archivo principal PDF o imagen {editingLeccionId ? '(opcional para reemplazar)' : ''}
                   <br />
                   <input
                     type="file"
-                    accept="application/pdf"
+                    accept="application/pdf,image/*"
                     onChange={(event) => setLessonFile(event.target.files?.[0] || null)}
                   />
                 </label>
+
+                {lessonPreviewUrl && (
+                  <div className="media-preview-card">
+                    <p className="resource-type">Vista previa</p>
+                    <img src={lessonPreviewUrl} alt="Vista previa del archivo principal" className="uploaded-media-preview" />
+                  </div>
+                )}
 
                 <div className="action-row">
                   <button className="resource-button" onClick={handleLessonSubmit} disabled={isSubmittingLesson}>
@@ -1039,6 +1155,17 @@ export default function AdminCurso() {
               <p className="module-description">
                 {leccionSeleccionada.descripcion || 'Sin descripcion para esta clase.'}
               </p>
+
+              {leccionSeleccionada.pdf_url && isImageResource(leccionSeleccionada.pdf_url) && (
+                <div className="media-preview-card">
+                  <p className="resource-type">Portada o material visual</p>
+                  <ResourceImage
+                    resource={leccionSeleccionada.pdf_url}
+                    alt={`Material visual de ${leccionSeleccionada.titulo}`}
+                    className="uploaded-media-preview"
+                  />
+                </div>
+              )}
 
               <div className="action-row">
                 <button className="resource-button" onClick={() => iniciarNuevaActividad(leccionSeleccionada.id)}>
@@ -1144,13 +1271,32 @@ export default function AdminCurso() {
                     />
 
                     <label>
-                      Archivo del contenido
+                      Archivo del contenido PDF o imagen
                       <br />
                       <input
                         type="file"
+                        accept="application/pdf,image/*"
                         onChange={(event) => setResourceFile(event.target.files?.[0] || null)}
                       />
                     </label>
+
+                    {resourcePreviewUrl && (
+                      <div className="media-preview-card">
+                        <p className="resource-type">Vista previa</p>
+                        <img src={resourcePreviewUrl} alt="Vista previa del contenido" className="uploaded-media-preview" />
+                      </div>
+                    )}
+
+                    {!resourcePreviewUrl && contentForm.contenidoUrl && isImageResource(contentForm.contenidoUrl) && (
+                      <div className="media-preview-card">
+                        <p className="resource-type">Vista previa</p>
+                        <ResourceImage
+                          resource={contentForm.contenidoUrl}
+                          alt="Vista previa del contenido"
+                          className="uploaded-media-preview"
+                        />
+                      </div>
+                    )}
 
                     <input
                       type="number"
@@ -1193,6 +1339,16 @@ export default function AdminCurso() {
                         <p className="resource-type">{getTipoLabel(contenido.tipo)}</p>
                         <h4>{contenido.orden}. {contenido.titulo}</h4>
                         <p>{contenido.descripcion || 'Sin descripcion.'}</p>
+                        {contenido.contenido_url && isImageResource(contenido.contenido_url) && (
+                          <div className="media-preview-card">
+                            <p className="resource-type">Vista previa</p>
+                            <ResourceImage
+                              resource={contenido.contenido_url}
+                              alt={`Vista previa de ${contenido.titulo}`}
+                              className="uploaded-media-preview"
+                            />
+                          </div>
+                        )}
                         <div className="meta-row">
                           <span className="status-pill neutral">
                             {contenido.acepta_entrega ? 'Con entrega' : 'Solo lectura'}
@@ -1231,6 +1387,54 @@ export default function AdminCurso() {
             </article>
           )}
 
+          <article className="curso-card admin-editor-card">
+            <div className="admin-panel-title">
+              <p className="dashboard-eyebrow">Libro de calificaciones</p>
+              <h3>Resumen del curso</h3>
+            </div>
+
+            {gradebookRows.length === 0 && (
+              <p className="empty-state">Todavia no hay entregas suficientes para mostrar el libro de calificaciones.</p>
+            )}
+
+            {gradebookRows.length > 0 && (
+              <div className="gradebook-grid">
+                {gradebookRows.map((row) => (
+                  <article key={row.studentId} className="gradebook-card">
+                    <div className="resource-heading">
+                      <div>
+                        <p className="resource-type">Estudiante</p>
+                        <h4>{shortStudentId(row.studentId)}</h4>
+                      </div>
+                      <span className={`status-pill ${row.promedio !== null ? 'calificado' : 'pendiente'}`}>
+                        {row.promedio !== null ? `Promedio ${row.promedio.toFixed(1)}` : 'Sin nota'}
+                      </span>
+                    </div>
+
+                    <div className="admin-class-summary">
+                      <div className="summary-chip">
+                        <span>Actividades</span>
+                        <strong>{row.totalActividades}</strong>
+                      </div>
+                      <div className="summary-chip">
+                        <span>Entregadas</span>
+                        <strong>{row.entregadas}</strong>
+                      </div>
+                      <div className="summary-chip">
+                        <span>Calificadas</span>
+                        <strong>{row.calificadas}</strong>
+                      </div>
+                      <div className="summary-chip">
+                        <span>Pendientes</span>
+                        <strong>{row.pendientes}</strong>
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </article>
+
           {!showLessonForm && leccionSeleccionada && (
             <article className="curso-card admin-editor-card">
               <div className="admin-panel-title">
@@ -1259,6 +1463,17 @@ export default function AdminCurso() {
                             retroalimentacion: entrega.retroalimentacion || '',
                           }
                           const status = getEntregaStatus(leccionSeleccionada, contenido, entrega)
+                          const simulador = contenido.tipo === 'simulador'
+                            ? getSimuladorDeContenido(contenido.id)
+                            : null
+                          const intento = simulador
+                            ? getIntentoDeEntrega(entrega, contenido.id)
+                            : null
+                          const preguntasIntento = simulador
+                            ? simuladorPreguntas.filter(
+                                (pregunta) => pregunta.simulador_id === simulador.id,
+                              )
+                            : []
                           return (
                             <article key={entrega.id} className="submission-card">
                               <div className="submission-meta">
@@ -1273,6 +1488,57 @@ export default function AdminCurso() {
 
                               {entrega.comentario && (
                                 <p className="submission-comment">{entrega.comentario}</p>
+                              )}
+
+                              {intento && (
+                                <div className="attempt-review-card">
+                                  <div className="meta-row">
+                                    <span className="status-pill neutral">
+                                      Intento #{intento.numero_intento || 1}
+                                    </span>
+                                    <span className="status-pill neutral">
+                                      Puntaje {intento.puntaje}/{intento.total_preguntas}
+                                    </span>
+                                    <span className="status-pill neutral">
+                                      Tiempo {Math.floor((intento.tiempo_segundos || 0) / 60)}:
+                                      {((intento.tiempo_segundos || 0) % 60).toString().padStart(2, '0')}
+                                    </span>
+                                  </div>
+
+                                  <div className="attempt-answer-list">
+                                    {preguntasIntento.map((pregunta) => {
+                                      const respuestaEstudiante = getRespuestaLabel(
+                                        pregunta.id,
+                                        intento.respuestas,
+                                      )
+                                      const esCorrecta =
+                                        respuestaEstudiante === pregunta.respuesta_correcta
+
+                                      return (
+                                        <div key={pregunta.id} className="attempt-answer-item">
+                                          <strong>
+                                            {pregunta.orden}.{' '}
+                                            <MathContent
+                                              text={pregunta.enunciado}
+                                              className="resource-math-content inline"
+                                            />
+                                          </strong>
+                                          <p>
+                                            Respuesta del estudiante: {respuestaEstudiante}
+                                          </p>
+                                          <p>
+                                            Respuesta correcta: {pregunta.respuesta_correcta}
+                                          </p>
+                                          <span
+                                            className={`status-pill ${esCorrecta ? 'calificado' : 'vencido'}`}
+                                          >
+                                            {esCorrecta ? 'Correcta' : 'Incorrecta'}
+                                          </span>
+                                        </div>
+                                      )
+                                    })}
+                                  </div>
+                                </div>
                               )}
 
                               {entrega.archivo_url && (
