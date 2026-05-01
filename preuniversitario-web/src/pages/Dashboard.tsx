@@ -14,6 +14,7 @@ export default function Dashboard() {
   const [courseName, setCourseName] = useState('')
   const [courseDescription, setCourseDescription] = useState('')
   const [isCreatingCourse, setIsCreatingCourse] = useState(false)
+
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -30,34 +31,42 @@ export default function Dashboard() {
       return
     }
 
-    const requests = [
-      supabase.from('cursos').select('*').order('nombre'),
-      supabase.from('perfiles').select('id, rol').eq('id', user.id).maybeSingle(),
-    ]
+    try {
+      const [cursosResult, perfilResult, entregasResult] = await Promise.all([
+        supabase.from('cursos').select('*').order('nombre'),
+        supabase.from('perfiles').select('id, rol').eq('id', user.id).maybeSingle(),
+        supabase
+          .from('entregas_actividades')
+          .select('*')
+          .eq('estudiante_id', user.id)
+          .order('created_at', { ascending: false }),
+      ])
 
-    requests.push(
-      supabase
-        .from('entregas_actividades')
-        .select('*')
-        .eq('estudiante_id', user.id)
-        .order('created_at', { ascending: false }),
-    )
+      setCursos((cursosResult.data as Curso[]) || [])
+      setPerfil((perfilResult.data as Perfil | null) || null)
+      setEntregas((entregasResult.data as EntregaActividad[]) || [])
+    } catch (error) {
+      console.error('Error cargando dashboard:', error)
+    }
 
-    const [cursosResult, perfilResult, entregasResult] = await Promise.all(requests)
-
-    setCursos(cursosResult.data || [])
-    setPerfil((perfilResult.data as Perfil | null) || null)
-    setEntregas((entregasResult.data as EntregaActividad[] | undefined) || [])
     setLoading(false)
   }
 
   const isAdmin = perfil?.rol === 'admin'
-  const calificadas = entregas.filter((entrega) => entrega.nota !== null && entrega.nota !== undefined)
+
+  const calificadas = entregas.filter(
+    (entrega) => entrega.nota !== null && entrega.nota !== undefined
+  )
+
   const promedioGeneral =
     calificadas.length > 0
-      ? calificadas.reduce((total, entrega) => total + (entrega.nota || 0), 0) / calificadas.length
+      ? calificadas.reduce((total, entrega) => total + (entrega.nota || 0), 0) /
+        calificadas.length
       : null
-  const pendientesRevision = entregas.filter((entrega) => entrega.estado === 'entregado').length
+
+  const pendientesRevision = entregas.filter(
+    (entrega) => entrega.estado === 'entregado'
+  ).length
 
   const clearMessage = () => {
     window.setTimeout(() => setMensaje(''), 3500)
@@ -119,12 +128,17 @@ export default function Dashboard() {
     setShowCourseForm(false)
     setMensaje('Curso creado con exito.')
     setIsCreatingCourse(false)
+
     await cargarDashboard()
     clearMessage()
   }
 
   if (loading) {
-    return <div className="container"><p>Cargando dashboard...</p></div>
+    return (
+      <div className="container">
+        <p>Cargando dashboard...</p>
+      </div>
+    )
   }
 
   return (
@@ -154,14 +168,22 @@ export default function Dashboard() {
           {!isAdmin && (
             <article className="hero-stat-card">
               <span>Promedio</span>
-              <strong>{promedioGeneral !== null ? promedioGeneral.toFixed(1) : 'Sin notas'}</strong>
+              <strong>
+                {promedioGeneral !== null
+                  ? promedioGeneral.toFixed(1)
+                  : 'Sin notas'}
+              </strong>
             </article>
           )}
         </div>
       </section>
 
       {mensaje && (
-        <p className={`feedback-banner ${mensaje.includes('exito') ? 'success' : 'error'}`}>
+        <p
+          className={`feedback-banner ${
+            mensaje.includes('exito') ? 'success' : 'error'
+          }`}
+        >
           {mensaje}
         </p>
       )}
@@ -190,7 +212,9 @@ export default function Dashboard() {
 
           <article className="curso-card dashboard-course-card student">
             <div className="dashboard-course-top">
-              <span className="dashboard-course-pill">Pendientes de revision</span>
+              <span className="dashboard-course-pill">
+                Pendientes de revision
+              </span>
               <h3>{pendientesRevision}</h3>
             </div>
             <p className="dashboard-course-description">
@@ -209,7 +233,7 @@ export default function Dashboard() {
             </div>
             <button
               className="resource-button"
-              onClick={() => setShowCourseForm((current) => !current)}
+              onClick={() => setShowCourseForm((c) => !c)}
             >
               {showCourseForm ? 'Cerrar' : '+ Nuevo curso'}
             </button>
@@ -220,13 +244,13 @@ export default function Dashboard() {
               <input
                 value={courseName}
                 placeholder="Nombre del curso"
-                onChange={(event) => setCourseName(event.target.value)}
+                onChange={(e) => setCourseName(e.target.value)}
               />
               <textarea
                 rows={3}
                 value={courseDescription}
                 placeholder="Descripcion del curso"
-                onChange={(event) => setCourseDescription(event.target.value)}
+                onChange={(e) => setCourseDescription(e.target.value)}
               />
               <div className="action-row">
                 <button
@@ -256,9 +280,15 @@ export default function Dashboard() {
         {cursos.map((curso) => (
           <article
             key={curso.id}
-            className={`curso-card dashboard-course-card ${isAdmin ? 'admin' : 'student'}`}
+            className={`curso-card dashboard-course-card ${
+              isAdmin ? 'admin' : 'student'
+            }`}
             onClick={() =>
-              navigate(isAdmin ? `/admin/curso/${curso.id}` : `/curso/${curso.id}`)
+              navigate(
+                isAdmin
+                  ? `/admin/curso/${curso.id}`
+                  : `/curso/${curso.id}`
+              )
             }
           >
             <div className="dashboard-course-top">
@@ -267,9 +297,13 @@ export default function Dashboard() {
               </span>
               <h3>{curso.nombre}</h3>
             </div>
-            <p className="dashboard-course-description">{curso.descripcion}</p>
+            <p className="dashboard-course-description">
+              {curso.descripcion}
+            </p>
             <div className="dashboard-course-footer">
-              <span>{isAdmin ? 'Clases y actividades' : 'Contenido del modulo'}</span>
+              <span>
+                {isAdmin ? 'Clases y actividades' : 'Contenido del modulo'}
+              </span>
               <strong>{isAdmin ? 'Abrir panel' : 'Ver curso'}</strong>
             </div>
           </article>
